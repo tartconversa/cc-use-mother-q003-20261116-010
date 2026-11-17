@@ -3,7 +3,7 @@ from __future__ import annotations
 from collections import defaultdict
 from decimal import Decimal
 
-from .model import LakeError, amount, calendar_day, key
+from .model import LakeError, amount, calendar_day, decimal_text, key
 from .store import Store
 
 
@@ -61,12 +61,18 @@ class Settlement:
         if not tolerance.is_finite() or tolerance < 0 or tolerance > 100:
             raise LakeError("invalid_money_tolerance", "money tolerance out of range")
         deposits = [fact for fact in facts if fact["event_type"] == "deposit"]
+        active = [fact for fact in deposits if fact.get("state", "active") == "active"]
+        revoked = [fact for fact in deposits if fact.get("state") == "revoked"]
         payouts = [fact for fact in facts if fact["event_type"] == "payout"]
+        adjustments = [fact for fact in facts if fact["event_type"] == "payout_adjustment"]
+        revocations = [fact for fact in facts if fact["event_type"] == "revocation"]
         expected = Decimal("0")
         actual = sum((Decimal(fact["payout_yuan"] or "0") for fact in payouts), Decimal("0"))
+        adjusted = sum((Decimal(fact["adjustment_yuan"] or "0") for fact in adjustments), Decimal("0"))
+        net = actual + adjusted
         pricing = []
         missing_rates = []
-        for fact in deposits:
+        for fact in active:
             rate = self.rate_at(fact["material_id"], fact["channel"], fact["day"])
             if rate is None:
                 missing_rates.append(fact["id"])
@@ -75,15 +81,39 @@ class Settlement:
             expected += value
             pricing.append({"fact_id": fact["id"], "rate_id": rate["id"],
                             "rate_version": rate["version"], "expected_yuan": format(value, "f")})
+        revoked_value = Decimal("0")
+        for fact in revoked:
+            rate = self.rate_at(fact["material_id"], fact["channel"], fact["day"])
+            if rate is not None:
+                revoked_value += Decimal(fact["weight_kg"]) * Decimal(rate["rate_yuan_per_kg"])
         issues = []
         if payouts and missing_rates:
             issues.append({"code": "unpriced_deposit", "fact_ids": missing_rates})
         if payouts and not deposits:
             issues.append({"code": "orphan_payout", "fact_ids": [row["id"] for row in payouts]})
-        if payouts and not missing_rates and abs(expected - actual) > tolerance:
-            issues.append({"code": "payout_gap", "fact_ids": [row["id"] for row in payouts + deposits],
-                           "gap_yuan": format(actual - expected, "f")})
+        if adjustments and not revocations:
+            issues.append({"code": "orphan_adjustment",
+                           "fact_ids": [row["id"] for row in adjustments]})
+        money_facts = payouts + adjustments + revocations + revoked
+        if (payouts or adjustments) and not missing_rates:
+            gap = net - expected
+            if abs(gap) > tolerance:
+                if revocations or revoked:
+                    code = "clawback_outstanding" if gap > 0 else "clawback_overpaid"
+                    issue = {"code": code, "fact_ids": [row["id"] for row in money_facts],
+                             "expected_yuan": format(expected, "f"),
+                             "net_paid_yuan": format(net, "f")}
+                    if gap > 0:
+                        issue["remaining_yuan"] = format(gap, "f")
+                    else:
+                        issue["excess_yuan"] = format(-gap, "f")
+                    issues.append(issue)
+                else:
+                    issues.append({"code": "payout_gap", "fact_ids": [row["id"] for row in payouts + deposits],
+                                   "gap_yuan": format(actual - expected, "f")})
         return {"expected_yuan": format(expected, "f"), "actual_yuan": format(actual, "f"),
+                "adjustment_yuan": decimal_text(adjusted), "net_yuan": decimal_text(net),
+                "revoked_yuan": format(revoked_value, "f"),
                 "pricing": pricing, "issues": issues,
                 "tolerance_yuan": format(tolerance, "f")}
 

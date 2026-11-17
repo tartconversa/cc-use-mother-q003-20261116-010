@@ -57,3 +57,23 @@ def balanced_batch(batch_id: str = "batch-1", prefix: str = "a", material_id: st
         result.append(event("payout", prefix + "-payout", batch_id, material_id, weight,
                             payout_yuan=payout, **changes))
     return result
+
+
+def revocation(external_id: str, target_external_id: str, batch_id: str = "batch-1",
+               happened_at: str = "2026-08-03T10:00:00+08:00", **changes):
+    row = {"source": "box-feed", "external_id": external_id, "event_type": "revocation",
+           "happened_at": happened_at, "batch_id": batch_id, "channel": "smart_box",
+           "device_id": "box-1", "target_external_id": target_external_id}
+    row.update(changes)
+    return row
+
+
+def adjustment(external_id: str, target_external_id: str, amount_yuan: str,
+               batch_id: str = "batch-1", happened_at: str = "2026-08-10T10:00:00+08:00",
+               **changes):
+    row = {"source": "pay-feed", "external_id": external_id, "event_type": "payout_adjustment",
+           "happened_at": happened_at, "batch_id": batch_id, "channel": "payment",
+           "actor_id": "resident-1", "adjustment_yuan": amount_yuan,
+           "target_source": "box-feed", "target_external_id": target_external_id}
+    row.update(changes)
+    return row

@@ -62,9 +62,27 @@ def amount(value, name: str, allow_zero: bool = False) -> str:
     return format(number.normalize(), "f")
 
 
+def signed_amount(value, name: str) -> str:
+    if isinstance(value, bool) or value is None:
+        raise LakeError("invalid_" + name, f"{name} must be numeric")
+    try:
+        number = Decimal(str(value))
+    except InvalidOperation as exc:
+        raise LakeError("invalid_" + name, f"{name} must be numeric") from exc
+    if not number.is_finite() or number == 0:
+        raise LakeError("invalid_" + name, f"{name} must be non-zero")
+    if abs(number) > Decimal("1000000000000") or abs(number.as_tuple().exponent) > 6:
+        raise LakeError("invalid_" + name, f"{name} exceeds supported precision")
+    return format(number.normalize(), "f")
+
+
 def digest(value) -> str:
     return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True,
                                      separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+def decimal_text(value: Decimal) -> str:
+    return "0" if value == 0 else format(value, "f")
 
 
 def now() -> str:
@@ -101,9 +119,11 @@ class Dimension:
         return cls(kind, external_id, name, start, end, attrs)
 
 
-EVENT_TYPES = {"deposit", "weigh_in", "weigh_out", "transfer", "payout"}
+EVENT_TYPES = {"deposit", "weigh_in", "weigh_out", "transfer", "payout",
+               "revocation", "payout_adjustment"}
 WEIGHT_EVENTS = {"deposit", "weigh_in", "weigh_out", "transfer"}
 CHANNELS = {"smart_box", "scale", "station", "payment"}
+TARGETED_EVENTS = {"revocation", "payout_adjustment"}
 
 
 @dataclass(frozen=True)
@@ -121,6 +141,9 @@ class RawEvent:
     payout_yuan: str | None
     channel: str
     metadata: dict
+    target_source: str | None = None
+    target_external_id: str | None = None
+    adjustment_yuan: str | None = None
 
     @classmethod
     def parse(cls, data: dict) -> "RawEvent":
@@ -146,6 +169,12 @@ class RawEvent:
             raise LakeError("missing_station", "station events require station_id")
         weight = amount(data.get("weight_kg"), "weight_kg") if data.get("weight_kg") is not None else None
         payout = amount(data.get("payout_yuan"), "payout_yuan", True) if data.get("payout_yuan") is not None else None
+        adjustment = signed_amount(data.get("adjustment_yuan"), "adjustment_yuan") \
+            if data.get("adjustment_yuan") is not None else None
+        target_source = key(data.get("target_source"), "target_source") \
+            if data.get("target_source") is not None else None
+        target_external_id = key(data.get("target_external_id"), "target_external_id") \
+            if data.get("target_external_id") is not None else None
         if event_type in WEIGHT_EVENTS and weight is None:
             raise LakeError("missing_weight", "weight events require weight_kg")
         if event_type == "payout" and (payout is None or ids["actor_id"] is None):
@@ -156,16 +185,39 @@ class RawEvent:
             raise LakeError("invalid_channel", "deposit channel must be smart_box")
         if event_type in {"weigh_in", "weigh_out"} and channel != "scale":
             raise LakeError("invalid_channel", "weighing channel must be scale")
+        if event_type in TARGETED_EVENTS:
+            if weight is not None or payout is not None:
+                raise LakeError("invalid_event", f"{event_type} carries no weight or payout")
+            if target_external_id is None:
+                raise LakeError("missing_target", f"{event_type} requires target_external_id")
+        elif target_source is not None or target_external_id is not None or adjustment is not None:
+            raise LakeError("invalid_event", f"{event_type} cannot carry target or adjustment fields")
+        if event_type == "revocation" and channel != "smart_box":
+            raise LakeError("invalid_channel", "revocation channel must be smart_box")
+        if event_type == "revocation" and adjustment is not None:
+            raise LakeError("invalid_event", "revocation carries no adjustment")
+        if event_type == "payout_adjustment":
+            if channel != "payment":
+                raise LakeError("invalid_channel", "payout_adjustment channel must be payment")
+            if adjustment is None or ids["actor_id"] is None:
+                raise LakeError("missing_adjustment", "payout_adjustment requires actor_id and adjustment_yuan")
+            if target_source is None:
+                raise LakeError("missing_target", "payout_adjustment requires target_source")
         metadata = data.get("metadata", {})
         if not isinstance(metadata, dict) or len(json.dumps(metadata, ensure_ascii=False)) > 3000:
             raise LakeError("invalid_metadata", "metadata must be a small object")
         return cls(source, external_id, event_type, happened_at, batch_id,
                    ids["material_id"], ids["device_id"], ids["station_id"],
-                   ids["actor_id"], weight, payout, channel, metadata)
+                   ids["actor_id"], weight, payout, channel, metadata,
+                   target_source, target_external_id, adjustment)
 
     def as_dict(self) -> dict:
         return self.__dict__.copy()
 
     @property
     def content_hash(self) -> str:
-        return digest(self.as_dict())
+        data = self.as_dict()
+        for optional in ("target_source", "target_external_id", "adjustment_yuan"):
+            if data[optional] is None:
+                del data[optional]
+        return digest(data)

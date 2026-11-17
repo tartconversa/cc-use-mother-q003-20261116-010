@@ -44,6 +44,9 @@ class EventInput(Strict):
     actor_id: str | None = None
     weight_kg: str | None = None
     payout_yuan: str | None = None
+    target_source: str | None = None
+    target_external_id: str | None = None
+    adjustment_yuan: str | None = None
     metadata: dict = {}
 
 
@@ -141,6 +144,10 @@ def create_app(db_path: str | Path | None = None):
     @app.get("/batches/{batch_id}")
     def batch(batch_id: str):
         return service.batch_status(batch_id)
+
+    @app.get("/batches/{batch_id}/payments")
+    def batch_payments(batch_id: str):
+        return service.payment_flow(batch_id)
 
     @app.get("/batches/{batch_id}/quality")
     def batch_quality(batch_id: str):

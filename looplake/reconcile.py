@@ -4,7 +4,7 @@ from collections import defaultdict
 from decimal import Decimal
 
 from .ledger import Ledger
-from .model import LakeError, key
+from .model import LakeError, decimal_text, key
 
 
 class Reconciliation:
@@ -32,10 +32,14 @@ class Reconciliation:
         if not facts:
             raise LakeError("unknown_batch", "batch has no normalized facts", 404)
         deposit = self._sum(facts, "deposit", "weight_kg")
+        revoked_deposit = sum((Decimal(row["weight_kg"] or "0") for row in facts
+                               if row["event_type"] == "deposit" and row.get("state") == "revoked"),
+                              Decimal("0"))
         weighing_in = self._sum(facts, "weigh_in", "weight_kg")
         weighing_out = self._sum(facts, "weigh_out", "weight_kg")
         transfer = self._sum(facts, "transfer", "weight_kg")
         payout = self._sum(facts, "payout", "payout_yuan")
+        adjustment = self._sum(facts, "payout_adjustment", "adjustment_yuan")
         issues = []
         if not self._ids(facts, "deposit"):
             issues.append({"code": "missing_deposit", "fact_ids": []})
@@ -64,7 +68,10 @@ class Reconciliation:
         return {"batch_id": batch_id, "ready": not issues, "tolerance_kg": format(tolerance, "f"),
                 "deposit_kg": format(deposit, "f"), "weigh_in_kg": format(weighing_in, "f"),
                 "weigh_out_kg": format(weighing_out, "f"), "transfer_kg": format(transfer, "f"),
-                "payout_yuan": format(payout, "f"), "fact_ids": [fact["id"] for fact in facts],
+                "revoked_deposit_kg": format(revoked_deposit, "f"),
+                "payout_yuan": format(payout, "f"), "adjustment_yuan": decimal_text(adjustment),
+                "net_payout_yuan": decimal_text(payout + adjustment),
+                "fact_ids": [fact["id"] for fact in facts],
                 "settlement": settled, "issues": issues}
 
     def month(self, month: str, tolerance_kg: str = "0.5"):
@@ -76,15 +83,18 @@ class Reconciliation:
 
     def sources(self, month: str):
         facts = self.ledger.period(month)
-        by_source = defaultdict(lambda: {"fact_count": 0, "weight_kg": Decimal("0"), "payout_yuan": Decimal("0")})
+        by_source = defaultdict(lambda: {"fact_count": 0, "weight_kg": Decimal("0"),
+                                         "payout_yuan": Decimal("0"), "adjustment_yuan": Decimal("0")})
         for fact in facts:
             bucket = by_source[fact["source"]]
             bucket["fact_count"] += 1
             bucket["weight_kg"] += Decimal(fact["weight_kg"] or "0")
             bucket["payout_yuan"] += Decimal(fact["payout_yuan"] or "0")
+            bucket["adjustment_yuan"] += Decimal(fact["adjustment_yuan"] or "0")
         return [{"source": source, "fact_count": values["fact_count"],
                  "weight_kg": format(values["weight_kg"], "f"),
-                 "payout_yuan": format(values["payout_yuan"], "f")}
+                 "payout_yuan": format(values["payout_yuan"], "f"),
+                 "adjustment_yuan": decimal_text(values["adjustment_yuan"])}
                 for source, values in sorted(by_source.items())]
 
     def fact_dependency(self, fact_id: int):

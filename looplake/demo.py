@@ -38,6 +38,18 @@ def events():
     ]
 
 
+def clawback_events():
+    return [
+        {"source": "box-feed", "external_id": "box-revoke-1", "event_type": "revocation",
+         "happened_at": "2026-08-03T10:00:00+08:00", "batch_id": "batch-1",
+         "channel": "smart_box", "device_id": "box-1", "target_external_id": "box-event-1"},
+        {"source": "pay-feed", "external_id": "pay-adjust-1", "event_type": "payout_adjustment",
+         "happened_at": "2026-08-10T10:00:00+08:00", "batch_id": "batch-1",
+         "channel": "payment", "actor_id": "collector-1", "adjustment_yuan": "-0.8",
+         "target_source": "box-feed", "target_external_id": "box-revoke-1"},
+    ]
+
+
 def run_demo():
     with TemporaryDirectory() as folder:
         service = LakeService(Path(folder) / "lake.sqlite3")
@@ -61,10 +73,34 @@ def run_demo():
         lineage = service.lineage.fact(outcomes[0]["fact_id"])
         if lineage["fact"]["street_id"] != "street-1":
             raise RuntimeError("fact lineage lost effective dimension")
+        clawback = [service.ingest(event) for event in clawback_events()]
+        if any(row["state"] != "normalized" for row in clawback):
+            raise RuntimeError("clawback events did not normalize")
+        replay = service.ingest(clawback_events()[1])
+        if replay["created"]:
+            raise RuntimeError("replayed adjustment charged twice")
+        checked = service.batch_status("batch-1")
+        if not checked["ready"] or checked["settlement"]["net_yuan"] != "0":
+            raise RuntimeError("clawback did not balance the batch")
+        frozen = service.releases.get(release["release_id"])
+        if frozen["content"]["mart"]["rows"][0]["deposit_kg"] != "10":
+            raise RuntimeError("published month was retroactively modified")
+        august = service.month_report("2026-08")
+        if august["rows"][0]["adjustment_yuan"] != "-0.8":
+            raise RuntimeError("clawback did not land in the processing month")
+        flow = service.payment_flow("batch-1")
+        if flow["net_paid_yuan"] != "0" or flow["entries"][-1]["original_day"] != "2026-07-15":
+            raise RuntimeError("payment flow lost traceability")
         return {"result": "ok", "normalized_fact_ids": [row["fact_id"] for row in outcomes],
                 "duplicate_created": duplicate["created"], "batch_ready": checked["ready"],
                 "deposit_kg": checked["deposit_kg"], "release_id": release["release_id"],
-                "release_fingerprint": frozen["fingerprint"]}
+                "release_fingerprint": frozen["fingerprint"],
+                "revoked_kg": checked["revoked_deposit_kg"],
+                "clawback_month": august["rows"][0]["month"],
+                "clawback_yuan": august["rows"][0]["adjustment_yuan"],
+                "frozen_july_deposit_kg": frozen["content"]["mart"]["rows"][0]["deposit_kg"],
+                "net_paid_yuan": flow["net_paid_yuan"],
+                "adjustment_replay_created": replay["created"]}
 
 
 if __name__ == "__main__":

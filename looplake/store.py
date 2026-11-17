@@ -31,7 +31,9 @@ CREATE TABLE IF NOT EXISTS facts (
  material_id TEXT, device_id TEXT, station_id TEXT, actor_id TEXT,
  street_id TEXT, community_id TEXT, weight_kg TEXT, payout_yuan TEXT,
  channel TEXT NOT NULL, dimensions_json TEXT NOT NULL,
- state TEXT NOT NULL DEFAULT 'active'
+ state TEXT NOT NULL DEFAULT 'active',
+ target_source TEXT, target_external_id TEXT, target_fact_id INTEGER,
+ original_day TEXT, adjustment_yuan TEXT
 );
 CREATE INDEX IF NOT EXISTS ix_fact_batch ON facts(batch_id,event_type);
 CREATE INDEX IF NOT EXISTS ix_fact_day ON facts(day,street_id,material_id);
@@ -57,12 +59,27 @@ CREATE INDEX IF NOT EXISTS ix_rate_period ON rate_cards(material_id,channel,vali
 """
 
 
+FACTS_MIGRATIONS = {
+    "target_source": "ALTER TABLE facts ADD COLUMN target_source TEXT",
+    "target_external_id": "ALTER TABLE facts ADD COLUMN target_external_id TEXT",
+    "target_fact_id": "ALTER TABLE facts ADD COLUMN target_fact_id INTEGER",
+    "original_day": "ALTER TABLE facts ADD COLUMN original_day TEXT",
+    "adjustment_yuan": "ALTER TABLE facts ADD COLUMN adjustment_yuan TEXT",
+}
+
+
 class Store:
     def __init__(self, path: str | Path):
         self.path = str(path)
         Path(self.path).parent.mkdir(parents=True, exist_ok=True)
         with self.connect() as conn:
             conn.executescript(SCHEMA)
+            existing = {row["name"] for row in
+                        conn.execute("PRAGMA table_info(facts)").fetchall()}
+            for column, statement in FACTS_MIGRATIONS.items():
+                if column not in existing:
+                    conn.execute(statement)
+            conn.execute("CREATE INDEX IF NOT EXISTS ix_fact_target ON facts(target_fact_id)")
 
     @contextmanager
     def connect(self):

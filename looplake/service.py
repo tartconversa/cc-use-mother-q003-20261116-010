@@ -50,6 +50,9 @@ class LakeService:
     def batch_status(self, batch_id):
         return self.reconciliation.batch(batch_id)
 
+    def payment_flow(self, batch_id):
+        return self.ledger.payment_flow(batch_id)
+
     def month_status(self, month):
         return self.quality.month(month)
 

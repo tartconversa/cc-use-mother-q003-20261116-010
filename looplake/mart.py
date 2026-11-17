@@ -14,47 +14,62 @@ class Mart:
 
     @staticmethod
     def _number(value: Decimal):
-        return format(value, "f")
+        from .model import decimal_text
+        return decimal_text(value)
 
     def month(self, month: str, include_unresolved: bool = False):
         facts = self.ledger.period(month)
         statuses = {batch: self.reconciliation.batch(batch) for batch in sorted({f["batch_id"] for f in facts})}
         selected_batches = {batch for batch, status in statuses.items() if status["ready"] or include_unresolved}
         buckets = defaultdict(lambda: {"weight_kg": Decimal("0"), "payout_yuan": Decimal("0"),
-                                       "deposit_events": 0, "payout_events": 0, "fact_ids": []})
+                                       "adjustment_yuan": Decimal("0"), "revoked_kg": Decimal("0"),
+                                       "deposit_events": 0, "payout_events": 0, "adjustment_events": 0,
+                                       "revoked_events": 0, "fact_ids": []})
         batch_locations = {}
-        for fact in facts:
-            if fact["event_type"] == "deposit":
-                batch_locations.setdefault(fact["batch_id"], set()).add((fact["street_id"], fact["material_id"]))
+        for batch in {f["batch_id"] for f in facts}:
+            for fact in self.ledger.batch(batch):
+                if fact["event_type"] == "deposit":
+                    batch_locations.setdefault(batch, set()).add((fact["street_id"], fact["material_id"]))
         excluded = []
         for fact in facts:
             if fact["batch_id"] not in selected_batches:
                 excluded.append(fact["id"])
                 continue
-            if fact["event_type"] not in {"deposit", "payout"}:
+            if fact["event_type"] in {"weigh_in", "weigh_out", "transfer"}:
                 continue
-            if fact["event_type"] == "payout":
+            if fact["event_type"] == "deposit":
+                location, material = fact["street_id"], fact["material_id"]
+            else:
                 destinations = batch_locations.get(fact["batch_id"], set())
                 if len(destinations) != 1:
                     excluded.append(fact["id"])
                     continue
                 location, material = next(iter(destinations))
-            else:
-                location, material = fact["street_id"], fact["material_id"]
             location = location or "unassigned"
             material = material or "unassigned"
             bucket = buckets[(location, material)]
             if fact["event_type"] == "deposit":
-                bucket["weight_kg"] += Decimal(fact["weight_kg"] or "0")
-                bucket["deposit_events"] += 1
-            else:
+                if fact.get("state") == "revoked":
+                    bucket["revoked_kg"] += Decimal(fact["weight_kg"] or "0")
+                    bucket["revoked_events"] += 1
+                else:
+                    bucket["weight_kg"] += Decimal(fact["weight_kg"] or "0")
+                    bucket["deposit_events"] += 1
+            elif fact["event_type"] == "payout":
                 bucket["payout_yuan"] += Decimal(fact["payout_yuan"] or "0")
                 bucket["payout_events"] += 1
+            elif fact["event_type"] == "payout_adjustment":
+                bucket["adjustment_yuan"] += Decimal(fact["adjustment_yuan"] or "0")
+                bucket["adjustment_events"] += 1
             bucket["fact_ids"].append(fact["id"])
         rows = [{"month": month, "street_id": key[0], "material_id": key[1],
                  "deposit_kg": self._number(value["weight_kg"]),
                  "payout_yuan": self._number(value["payout_yuan"]),
+                 "adjustment_yuan": self._number(value["adjustment_yuan"]),
+                 "revoked_kg": self._number(value["revoked_kg"]),
                  "deposit_events": value["deposit_events"], "payout_events": value["payout_events"],
+                 "adjustment_events": value["adjustment_events"],
+                 "revoked_events": value["revoked_events"],
                  "fact_ids": sorted(value["fact_ids"])} for key, value in sorted(buckets.items())]
         return {"month": month, "ready": bool(statuses) and all(r["ready"] for r in statuses.values()),
                 "rows": rows, "excluded_fact_ids": excluded,

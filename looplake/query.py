@@ -18,14 +18,19 @@ class Query:
                                        (community_id, month))
         deposits = [fact for fact in facts if fact["event_type"] == "deposit"]
         grouped = defaultdict(lambda: {"kg": Decimal("0"), "ids": []})
+        revoked_count = 0
         for fact in deposits:
+            if fact.get("state") == "revoked":
+                revoked_count += 1
+                continue
             entry = grouped[fact["material_id"]]
             entry["kg"] += Decimal(fact["weight_kg"])
             entry["ids"].append(fact["id"])
         rows = [{"material_id": material, "deposit_kg": format(values["kg"], "f"),
                  "fact_ids": sorted(values["ids"])} for material, values in sorted(grouped.items())]
         return {"community_id": community_id, "month": month, "rows": rows,
-                "deposit_event_count": len(deposits)}
+                "deposit_event_count": len(deposits) - revoked_count,
+                "revoked_deposit_count": revoked_count}
 
     def device_history(self, device_id: str, start: str, end: str):
         device_id = key(device_id, "device_id")
@@ -37,6 +42,7 @@ class Query:
         rows = [{"fact_id": fact["id"], "day": fact["day"],
                  "street_id": fact["street_id"], "community_id": fact["community_id"],
                  "material_id": fact["material_id"], "weight_kg": fact["weight_kg"],
+                 "state": fact.get("state", "active"),
                  "dimension_version": fact["dimensions"].get("device", {}).get("version")}
                 for fact in facts if fact["event_type"] == "deposit"]
         return {"device_id": device_id, "start": start, "end": end, "rows": rows}

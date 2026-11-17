@@ -29,6 +29,8 @@ def parser():
     rate.add_argument("rate_yuan_per_kg")
     check = sub.add_parser("check")
     check.add_argument("batch_id")
+    payments = sub.add_parser("payments")
+    payments.add_argument("batch_id")
     mart = sub.add_parser("mart")
     mart.add_argument("month")
     preview = sub.add_parser("preview")
@@ -58,6 +60,8 @@ def execute(service: LakeService, args):
                                            args.rate_yuan_per_kg)
     if args.command == "check":
         return service.batch_status(args.batch_id)
+    if args.command == "payments":
+        return service.payment_flow(args.batch_id)
     if args.command == "mart":
         return service.month_report(args.month)
     if args.command == "preview":
